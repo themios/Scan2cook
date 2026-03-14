@@ -4,7 +4,7 @@
     "slug": "receipt2pantry",
     "version": "1.0.0",
     "scheme": "receipt2pantry",
-    "platforms": ["ios", "android"],
+    "platforms": ["ios", "android", "web"],
     "plugins": [
       [
         "expo-camera",
