@@ -14,8 +14,18 @@ import {
 import { useFocusEffect } from 'expo-router';
 import { getPantry } from '../lib/storage';
 import * as ImagePicker from 'expo-image-picker';
-import { suggestRecipes, suggestRecipesFromPhoto } from '../lib/claude';
+import * as DocumentPicker from 'expo-document-picker';
+import {
+  extractRecipeDataFromUpload,
+  suggestRecipes,
+  suggestRecipesFromPhoto,
+} from '../lib/claude';
 import { PantryItem, Recipe } from '../lib/types';
+import {
+  listRecipeUploadsFromCloud,
+  RecipeUploadMeta,
+  saveRecipeUploadToCloud,
+} from '../lib/cloud';
 import { DEMO_RECIPES } from '../lib/demo';
 import RecipeCard from '../components/RecipeCard';
 
@@ -38,6 +48,10 @@ export default function RecipesScreen() {
   const [selectedCuisine, setSelectedCuisine] =
     useState<(typeof CUISINE_OPTIONS)[number]>('Any');
   const [mainIngredientsInput, setMainIngredientsInput] = useState('');
+  const [recipeCount, setRecipeCount] = useState(3);
+  const [servings, setServings] = useState(2);
+  const [uploads, setUploads] = useState<RecipeUploadMeta[]>([]);
+  const [uploadingFile, setUploadingFile] = useState(false);
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -51,9 +65,16 @@ export default function RecipesScreen() {
 
   async function loadPantry() {
     setInitialLoading(true);
-    const items = await getPantry();
-    setPantryItems(items);
-    setInitialLoading(false);
+    try {
+      const [items, savedUploads] = await Promise.all([
+        getPantry(),
+        listRecipeUploadsFromCloud().catch(() => []),
+      ]);
+      setPantryItems(items);
+      setUploads(savedUploads);
+    } finally {
+      setInitialLoading(false);
+    }
   }
 
   async function handleSuggest() {
@@ -71,10 +92,7 @@ export default function RecipesScreen() {
     setError(null);
 
     try {
-      const result = await suggestRecipes(pantryItems, {
-        cuisine: selectedCuisine,
-        mainIngredients,
-      });
+      const result = await suggestRecipes(pantryItems, buildRecipePreferences(mainIngredients));
       setRecipes(result);
       setHasLoaded(true);
     } catch (err: any) {
@@ -96,14 +114,24 @@ export default function RecipesScreen() {
       .filter(Boolean);
   }
 
+  function buildRecipePreferences(mainIngredients = getMainIngredients()) {
+    return {
+      cuisine: selectedCuisine,
+      mainIngredients,
+      recipeCount,
+      servings,
+    };
+  }
+
   async function handleSuggestFromPhoto(base64Image: string) {
     setLoading(true);
     setError(null);
     try {
-      const result = await suggestRecipesFromPhoto(base64Image, pantryItems, {
-        cuisine: selectedCuisine,
-        mainIngredients: getMainIngredients(),
-      });
+      const result = await suggestRecipesFromPhoto(
+        base64Image,
+        pantryItems,
+        buildRecipePreferences()
+      );
       setRecipes(result);
       setHasLoaded(true);
     } catch (err: any) {
@@ -168,6 +196,50 @@ export default function RecipesScreen() {
     }
 
     await handleSuggestFromPhoto(base64);
+  }
+
+  async function handleUploadRecipeFile() {
+    try {
+      const picked = await DocumentPicker.getDocumentAsync({
+        type: ['image/*', 'application/pdf'],
+        copyToCacheDirectory: true,
+        multiple: false,
+        base64: true,
+      });
+
+      if (picked.canceled || !picked.assets?.length) return;
+      const file = picked.assets[0];
+      const base64Data = file.base64;
+
+      if (!base64Data) {
+        Alert.alert('Upload Failed', 'Could not read file content.');
+        return;
+      }
+
+      setUploadingFile(true);
+      const ocrData = await extractRecipeDataFromUpload({
+        mimeType: file.mimeType || 'application/octet-stream',
+        base64Data,
+      });
+
+      await saveRecipeUploadToCloud({
+        fileName: file.name || 'recipe-file',
+        mimeType: file.mimeType || 'application/octet-stream',
+        ocrData,
+      });
+
+      const latestUploads = await listRecipeUploadsFromCloud();
+      setUploads(latestUploads);
+      Alert.alert('Saved', 'Recipe OCR data saved to cloud database.');
+    } catch (err: any) {
+      const message =
+        err.message?.includes('Please sign in')
+          ? 'Please sign in from the Account tab first.'
+          : err.message || 'Could not upload file.';
+      Alert.alert('Upload Failed', message);
+    } finally {
+      setUploadingFile(false);
+    }
   }
 
   function handleShowDemo() {
@@ -248,6 +320,54 @@ export default function RecipesScreen() {
               <Text style={styles.prefHint}>
                 Separate ingredients with commas.
               </Text>
+
+              <View style={styles.countsRow}>
+                <View style={styles.countCard}>
+                  <Text style={styles.countLabel}>Recipes</Text>
+                  <View style={styles.stepperRow}>
+                    <TouchableOpacity
+                      style={styles.stepperBtn}
+                      onPress={() => setRecipeCount((v) => Math.max(1, v - 1))}
+                      accessibilityRole="button"
+                      accessibilityLabel="Decrease recipe count"
+                    >
+                      <Text style={styles.stepperBtnText}>-</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.countValue}>{recipeCount}</Text>
+                    <TouchableOpacity
+                      style={styles.stepperBtn}
+                      onPress={() => setRecipeCount((v) => Math.min(10, v + 1))}
+                      accessibilityRole="button"
+                      accessibilityLabel="Increase recipe count"
+                    >
+                      <Text style={styles.stepperBtnText}>+</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                <View style={styles.countCard}>
+                  <Text style={styles.countLabel}>Servings</Text>
+                  <View style={styles.stepperRow}>
+                    <TouchableOpacity
+                      style={styles.stepperBtn}
+                      onPress={() => setServings((v) => Math.max(1, v - 1))}
+                      accessibilityRole="button"
+                      accessibilityLabel="Decrease servings"
+                    >
+                      <Text style={styles.stepperBtnText}>-</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.countValue}>{servings}</Text>
+                    <TouchableOpacity
+                      style={styles.stepperBtn}
+                      onPress={() => setServings((v) => Math.min(20, v + 1))}
+                      accessibilityRole="button"
+                      accessibilityLabel="Increase servings"
+                    >
+                      <Text style={styles.stepperBtnText}>+</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
             </View>
 
             {/* Suggest button */}
@@ -294,6 +414,22 @@ export default function RecipesScreen() {
               </TouchableOpacity>
             </View>
 
+            <TouchableOpacity
+              style={[styles.uploadRecipeBtn, uploadingFile && styles.suggestBtnDisabled]}
+              onPress={handleUploadRecipeFile}
+              disabled={uploadingFile}
+              accessibilityRole="button"
+              accessibilityLabel="Upload recipe screenshot, image, or PDF"
+            >
+              {uploadingFile ? (
+                <ActivityIndicator color="#2E7D32" />
+              ) : (
+                <Text style={styles.uploadRecipeBtnText}>
+                  Upload Recipe Screenshot / Image / PDF
+                </Text>
+              )}
+            </TouchableOpacity>
+
             {loading && (
               <View style={styles.loadingCard}>
                 <Text style={styles.loadingText}>
@@ -339,6 +475,22 @@ export default function RecipesScreen() {
                 </Text>
                 {recipes.map((recipe) => (
                   <RecipeCard key={recipe.id} recipe={recipe} />
+                ))}
+              </View>
+            )}
+
+            {uploads.length > 0 && (
+              <View style={styles.uploadsCard}>
+                <Text style={styles.uploadsTitle}>Saved Recipe Files</Text>
+                {uploads.slice(0, 8).map((upload) => (
+                  <View key={upload.id} style={styles.uploadRow}>
+                    <Text style={styles.uploadFileName} numberOfLines={1}>
+                      {upload.ocrTitle || upload.fileName}
+                    </Text>
+                    <Text style={styles.uploadMeta}>
+                      {new Date(upload.uploadedAt).toLocaleDateString()}
+                    </Text>
+                  </View>
                 ))}
               </View>
             )}
@@ -449,6 +601,55 @@ const styles = StyleSheet.create({
     color: '#9E9E9E',
     marginTop: 6,
   },
+  countsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+  },
+  countCard: {
+    flex: 1,
+    backgroundColor: '#F8FAF8',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+  },
+  countLabel: {
+    fontSize: 12,
+    color: '#616161',
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  stepperRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  stepperBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#E8F5E9',
+    borderWidth: 1,
+    borderColor: '#A5D6A7',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepperBtnText: {
+    color: '#2E7D32',
+    fontSize: 18,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  countValue: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#212121',
+    minWidth: 26,
+    textAlign: 'center',
+  },
   suggestBtn: {
     backgroundColor: '#2E7D32',
     borderRadius: 14,
@@ -497,6 +698,23 @@ const styles = StyleSheet.create({
   photoActionText: {
     fontSize: 13,
     color: '#2E7D32',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  uploadRecipeBtn: {
+    minHeight: 46,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#BDBDBD',
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    marginBottom: 14,
+  },
+  uploadRecipeBtnText: {
+    color: '#424242',
+    fontSize: 13,
     fontWeight: '700',
     textAlign: 'center',
   },
@@ -571,6 +789,39 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#9E9E9E',
     marginBottom: 10,
+  },
+  uploadsCard: {
+    marginTop: 8,
+    marginBottom: 12,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+    padding: 12,
+  },
+  uploadsTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#212121',
+    marginBottom: 8,
+  },
+  uploadRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#F0F0F0',
+  },
+  uploadFileName: {
+    flex: 1,
+    fontSize: 13,
+    color: '#424242',
+    marginRight: 8,
+  },
+  uploadMeta: {
+    fontSize: 12,
+    color: '#9E9E9E',
   },
   emptyState: {
     alignItems: 'center',

@@ -15,7 +15,9 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system';
 import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { parseReceiptImage, parseReceiptPdf, ParsedReceipt } from '../lib/claude';
 import { addPantryItems, saveReceipt } from '../lib/storage';
 import { PantryItem, ReceiptItem } from '../lib/types';
@@ -51,6 +53,7 @@ function estimateExpiration(category: string): string {
 
 export default function ScanScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const cameraRef = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [screenState, setScreenState] = useState<ScreenState>('camera');
@@ -77,37 +80,62 @@ export default function ScanScreen() {
 
     try {
       setScreenState('parsing');
+      let base64Image: string | undefined;
 
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.7,
-        base64: false,
-      });
+      try {
+        const photo = await cameraRef.current.takePictureAsync({
+          quality: 0.7,
+          base64: false,
+          skipProcessing: true,
+        });
 
-      if (!photo?.uri) {
-        throw new Error('Failed to capture photo');
+        if (!photo?.uri) {
+          throw new Error('Failed to capture photo');
+        }
+
+        // Resize to reduce payload size
+        const manipulated = await ImageManipulator.manipulateAsync(
+          photo.uri,
+          [{ resize: { width: 1200 } }],
+          { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+        );
+
+        base64Image = manipulated.base64 ?? undefined;
+      } catch {
+        // Fallback for Android devices where CameraView capture can fail intermittently.
+        const cameraPermission = await ImagePicker.requestCameraPermissionsAsync();
+        if (!cameraPermission.granted) {
+          throw new Error('Camera permission is required to capture receipt images.');
+        }
+
+        const fallback = await ImagePicker.launchCameraAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.7,
+          base64: true,
+        });
+
+        if (fallback.canceled || !fallback.assets?.length) {
+          throw new Error('Failed to capture image');
+        }
+        base64Image = fallback.assets[0].base64 ?? undefined;
       }
 
-      // Resize to reduce payload size
-      const manipulated = await ImageManipulator.manipulateAsync(
-        photo.uri,
-        [{ resize: { width: 1200 } }],
-        { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true }
-      );
-
-      if (!manipulated.base64) {
+      if (!base64Image) {
         throw new Error('Failed to encode image');
       }
 
-      const result = await parseReceiptImage(manipulated.base64);
+      const result = await parseReceiptImage(base64Image);
       setParsedFromResult(result);
       setScreenState('review');
     } catch (err: any) {
       setScreenState('camera');
+      const message =
+        typeof err?.message === 'string' && err.message.trim().length > 0
+          ? err.message
+          : 'Could not parse the receipt. Check API settings and try again.';
       Alert.alert(
         'Parse Failed',
-        err.message?.includes('API base URL')
-          ? err.message
-          : 'Could not parse the receipt. Make sure EXPO_PUBLIC_API_BASE_URL is set and try again with better lighting.',
+        message,
         [{ text: 'OK' }]
       );
     }
@@ -348,63 +376,66 @@ export default function ScanScreen() {
         style={styles.camera}
         facing="back"
         onCameraReady={() => setCameraReady(true)}
-      >
-        {/* Overlay UI */}
-        <View style={styles.cameraOverlay}>
-          {/* Top bar */}
-          <SafeAreaView>
-            <View style={styles.topBar}>
-              <TouchableOpacity
-                style={styles.backBtn}
-                onPress={() => router.push('/')}
-                accessibilityRole="button"
-                accessibilityLabel="Go back"
-              >
-                <Text style={styles.backBtnText}>✕</Text>
-              </TouchableOpacity>
-              <Text style={styles.cameraTitle}>Scan Receipt</Text>
-              <View style={{ width: 44 }} />
-            </View>
-          </SafeAreaView>
+        onMountError={(event) => {
+          const message = event?.nativeEvent?.message || 'Camera failed to initialize.';
+          setCameraReady(false);
+          Alert.alert('Camera Error', message);
+        }}
+      />
 
-          {/* Guide frame */}
-          <View style={styles.guideFrame}>
-            <Text style={styles.guideText}>
-              Position the receipt within the frame
-            </Text>
-            <View style={styles.receiptFrame}>
-              <View style={[styles.corner, styles.cornerTL]} />
-              <View style={[styles.corner, styles.cornerTR]} />
-              <View style={[styles.corner, styles.cornerBL]} />
-              <View style={[styles.corner, styles.cornerBR]} />
-            </View>
-          </View>
+      {/* Overlay UI */}
+      <View style={styles.cameraOverlay}>
+        {/* Top bar */}
+        <View style={[styles.topBar, { paddingTop: Math.max(insets.top, 8) }]}>
+          <TouchableOpacity
+            style={styles.backBtn}
+            onPress={() => router.push('/')}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+          >
+            <Text style={styles.backBtnText}>✕</Text>
+          </TouchableOpacity>
+          <Text style={styles.cameraTitle}>Scan Receipt</Text>
+          <View style={{ width: 44 }} />
+        </View>
 
-          {/* Bottom bar */}
-          <View style={styles.bottomBar}>
-            <Text style={styles.captureHint}>
-              Make sure the receipt is well-lit and flat
-            </Text>
-            <TouchableOpacity
-              style={styles.uploadBtnDark}
-              onPress={handleUpload}
-              accessibilityRole="button"
-              accessibilityLabel="Upload receipt image or PDF"
-            >
-              <Text style={styles.uploadBtnDarkText}>Upload Image/PDF</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.captureBtn, !cameraReady && styles.captureBtnDisabled]}
-              onPress={handleCapture}
-              disabled={!cameraReady}
-              accessibilityRole="button"
-              accessibilityLabel="Take photo of receipt"
-            >
-              <View style={styles.captureBtnInner} />
-            </TouchableOpacity>
+        {/* Guide frame */}
+        <View style={styles.guideFrame}>
+          <Text style={styles.guideText}>
+            Position the receipt within the frame
+          </Text>
+          <View style={styles.receiptFrame}>
+            <View style={[styles.corner, styles.cornerTL]} />
+            <View style={[styles.corner, styles.cornerTR]} />
+            <View style={[styles.corner, styles.cornerBL]} />
+            <View style={[styles.corner, styles.cornerBR]} />
           </View>
         </View>
-      </CameraView>
+
+        {/* Bottom bar */}
+        <View style={styles.bottomBar}>
+          <Text style={styles.captureHint}>
+            Make sure the receipt is well-lit and flat
+          </Text>
+          <TouchableOpacity
+            style={styles.uploadBtnDark}
+            onPress={handleUpload}
+            accessibilityRole="button"
+            accessibilityLabel="Upload receipt image or PDF"
+          >
+            <Text style={styles.uploadBtnDarkText}>Upload Image/PDF</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.captureBtn, !cameraReady && styles.captureBtnDisabled]}
+            onPress={handleCapture}
+            disabled={!cameraReady}
+            accessibilityRole="button"
+            accessibilityLabel="Take photo of receipt"
+          >
+            <View style={styles.captureBtnInner} />
+          </TouchableOpacity>
+        </View>
+      </View>
     </View>
   );
 }
@@ -504,7 +535,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   cameraOverlay: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
     justifyContent: 'space-between',
   },
   topBar: {

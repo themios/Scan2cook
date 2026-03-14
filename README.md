@@ -107,7 +107,23 @@ Set these environment variables in your Vercel project:
 GROQ_API_KEY=your_groq_key
 GROQ_RECIPE_MODEL=llama-3.3-70b-versatile
 GROQ_RECEIPT_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+AUTH_JWT_SECRET=long-random-secret-string
 ```
+
+For cloud recipe-file storage, add a Vercel KV (or Upstash Redis) integration and set:
+
+```
+KV_URL=...
+KV_REST_API_URL=...
+KV_REST_API_TOKEN=...
+KV_REST_API_READ_ONLY_TOKEN=...
+```
+
+If your integration only provides `kv_REDIS_URL`, the backend supports that value directly.
+
+Recipe upload privacy/storage behavior:
+- Original images/PDF files are used only transiently for OCR extraction.
+- Database stores only extracted OCR recipe data + metadata (title, ingredients, instructions, notes).
 
 Then deploy this repo to Vercel and update your local app `.env`:
 

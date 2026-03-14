@@ -85,6 +85,15 @@ export async function parseReceiptPdf(
 export interface RecipePreferences {
   cuisine?: string;
   mainIngredients?: string[];
+  recipeCount?: number;
+  servings?: number;
+}
+
+export interface ExtractedRecipeData {
+  title: string;
+  ingredients: string[];
+  instructions: string[];
+  notes: string;
 }
 
 export async function suggestRecipes(
@@ -153,4 +162,34 @@ export async function suggestRecipesFromPhoto(
 
   const data = await response.json();
   return data.data as Recipe[];
+}
+
+export async function extractRecipeDataFromUpload(input: {
+  mimeType: string;
+  base64Data: string;
+}): Promise<ExtractedRecipeData> {
+  if (!API_URL) {
+    throw new Error(
+      'API base URL not configured. Set EXPO_PUBLIC_API_BASE_URL in your .env file.'
+    );
+  }
+
+  const response = await fetch(API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'extractRecipeData',
+      payload: input,
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Backend API error ${response.status}: ${err}`);
+  }
+
+  const data = await response.json();
+  return data.data as ExtractedRecipeData;
 }
