@@ -1,9 +1,16 @@
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const pdfParse = require('pdf-parse');
 
 const DEFAULT_RECIPE_MODEL = process.env.GROQ_RECIPE_MODEL || 'llama-3.3-70b-versatile';
 const DEFAULT_RECEIPT_MODEL =
   process.env.GROQ_RECEIPT_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
+
+function getPdfParse() {
+  try {
+    return require('pdf-parse');
+  } catch (err) {
+    throw new Error('PDF parsing module is unavailable in this deployment.');
+  }
+}
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -101,6 +108,7 @@ async function parseReceiptText(receiptText) {
 }
 
 async function parseReceiptPdf(base64Pdf) {
+  const pdfParse = getPdfParse();
   const pdfBuffer = Buffer.from(base64Pdf, 'base64');
   const parsed = await pdfParse(pdfBuffer);
   const extractedText = parsed?.text?.trim();
@@ -110,6 +118,90 @@ async function parseReceiptPdf(base64Pdf) {
   }
 
   return parseReceiptText(extractedText);
+}
+
+async function extractRecipeFromText(recipeText) {
+  const trimmed = String(recipeText || '').trim();
+  if (!trimmed) {
+    throw new Error('No text found in uploaded file.');
+  }
+
+  const result = await callGroq({
+    model: DEFAULT_RECIPE_MODEL,
+    temperature: 0.2,
+    messages: [
+      {
+        role: 'user',
+        content:
+          'Extract recipe data from this text and return ONLY valid JSON (no markdown, no code fences) in this exact shape: ' +
+          '{"title":"string","ingredients":["string"],"instructions":["string"],"notes":"string"}. ' +
+          `\n\nRecipe text:\n${trimmed.slice(0, 15000)}`,
+      },
+    ],
+  });
+
+  const text = result?.choices?.[0]?.message?.content;
+  if (!text || typeof text !== 'string') {
+    throw new Error('Groq returned an empty recipe OCR response.');
+  }
+
+  const parsed = JSON.parse(cleanJsonText(text));
+  return {
+    title: String(parsed?.title || 'Untitled Recipe'),
+    ingredients: Array.isArray(parsed?.ingredients) ? parsed.ingredients.map(String) : [],
+    instructions: Array.isArray(parsed?.instructions) ? parsed.instructions.map(String) : [],
+    notes: String(parsed?.notes || ''),
+  };
+}
+
+async function extractRecipeFromImage(base64Image) {
+  const result = await callGroq({
+    model: DEFAULT_RECEIPT_MODEL,
+    temperature: 0.1,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text:
+              'Read this recipe screenshot/image and extract recipe data. Return ONLY valid JSON (no markdown, no code fences) in this exact shape: ' +
+              '{"title":"string","ingredients":["string"],"instructions":["string"],"notes":"string"}.',
+          },
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:image/jpeg;base64,${base64Image}`,
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  const text = result?.choices?.[0]?.message?.content;
+  if (!text || typeof text !== 'string') {
+    throw new Error('Groq returned an empty recipe image OCR response.');
+  }
+
+  const parsed = JSON.parse(cleanJsonText(text));
+  return {
+    title: String(parsed?.title || 'Untitled Recipe'),
+    ingredients: Array.isArray(parsed?.ingredients) ? parsed.ingredients.map(String) : [],
+    instructions: Array.isArray(parsed?.instructions) ? parsed.instructions.map(String) : [],
+    notes: String(parsed?.notes || ''),
+  };
+}
+
+async function extractRecipeFromPdf(base64Pdf) {
+  const pdfParse = getPdfParse();
+  const pdfBuffer = Buffer.from(base64Pdf, 'base64');
+  const parsed = await pdfParse(pdfBuffer);
+  const extractedText = parsed?.text?.trim();
+  if (!extractedText) {
+    throw new Error('Could not extract text from PDF recipe.');
+  }
+  return extractRecipeFromText(extractedText);
 }
 
 async function suggestRecipes(pantryItems, preferences = {}) {
@@ -123,6 +215,14 @@ async function suggestRecipes(pantryItems, preferences = {}) {
   const mainIngredientsText = mainIngredients.length > 0
     ? mainIngredients.join(', ')
     : 'None specified';
+  const recipeCount = Math.min(
+    10,
+    Math.max(1, Number.isFinite(preferences.recipeCount) ? Math.floor(preferences.recipeCount) : 3)
+  );
+  const servings = Math.min(
+    20,
+    Math.max(1, Number.isFinite(preferences.servings) ? Math.floor(preferences.servings) : 2)
+  );
 
   const result = await callGroq({
     model: DEFAULT_RECIPE_MODEL,
@@ -134,7 +234,8 @@ async function suggestRecipes(pantryItems, preferences = {}) {
           `I have these pantry items: ${itemList}. ` +
           `Preferred cuisine: ${cuisineText}. ` +
           `Main ingredients to prioritize: ${mainIngredientsText}. ` +
-          'Suggest 3 practical recipes. Use pantry items first, and include minimal extra items if needed. ' +
+          `Suggest ${recipeCount} practical recipes. Each recipe should serve ${servings} people. ` +
+          'Use pantry items first, and include minimal extra items if needed. ' +
           'If a cuisine is provided, keep all recipes in that cuisine style. ' +
           'Return ONLY valid JSON array, no markdown, no code fences, in this exact shape: ' +
           '[{"id":"unique-string","name":"string","cuisine":"string","ingredients":["string"],"instructions":["string"],"nutrition":{"calories":number,"protein":number,"fat":number,"carbs":number,"fiber":number}}]',
@@ -163,6 +264,14 @@ async function suggestRecipesFromPhoto(base64Image, pantryItems, preferences = {
   const mainIngredientsText = mainIngredients.length > 0
     ? mainIngredients.join(', ')
     : 'None specified';
+  const recipeCount = Math.min(
+    10,
+    Math.max(1, Number.isFinite(preferences.recipeCount) ? Math.floor(preferences.recipeCount) : 3)
+  );
+  const servings = Math.min(
+    20,
+    Math.max(1, Number.isFinite(preferences.servings) ? Math.floor(preferences.servings) : 2)
+  );
 
   const result = await callGroq({
     model: DEFAULT_RECIPE_MODEL,
@@ -178,7 +287,8 @@ async function suggestRecipesFromPhoto(base64Image, pantryItems, preferences = {
               `Also consider pantry items: ${pantryList}. ` +
               `Preferred cuisine: ${cuisineText}. ` +
               `Main ingredients to prioritize: ${mainIngredientsText}. ` +
-              'Suggest 3 practical recipes based on detected items + pantry context. ' +
+              `Suggest ${recipeCount} practical recipes based on detected items + pantry context. ` +
+              `Each recipe should serve ${servings} people. ` +
               'If a cuisine is provided, keep recipes in that cuisine style. ' +
               'Return ONLY valid JSON array, no markdown, no code fences, in this exact shape: ' +
               '[{"id":"unique-string","name":"string","cuisine":"string","ingredients":["string"],"instructions":["string"],"nutrition":{"calories":number,"protein":number,"fat":number,"carbs":number,"fiber":number}}]',
@@ -264,6 +374,21 @@ module.exports = async function handler(req, res) {
         pantryItems,
         payload.preferences
       );
+      jsonResponse(res, 200, { data });
+      return;
+    }
+
+    if (action === 'extractRecipeData') {
+      if (!payload?.base64Data) {
+        jsonResponse(res, 400, { error: 'Missing payload.base64Data' });
+        return;
+      }
+
+      const mimeType = String(payload?.mimeType || '');
+      const data = mimeType === 'application/pdf'
+        ? await extractRecipeFromPdf(payload.base64Data)
+        : await extractRecipeFromImage(payload.base64Data);
+
       jsonResponse(res, 200, { data });
       return;
     }
