@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "Receipt2Pantry",
+    "slug": "receipt2pantry",
+    "version": "1.0.0",
+    "scheme": "receipt2pantry",
+    "platforms": ["ios", "android"],
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Receipt2Pantry to access your camera to scan receipts."
+        }
+      ]
+    ],
+    "extra": {}
+  }
+}
