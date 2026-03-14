@@ -1,4 +1,5 @@
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const pdfParse = require('pdf-parse');
 
 const DEFAULT_RECIPE_MODEL = process.env.GROQ_RECIPE_MODEL || 'llama-3.3-70b-versatile';
 const DEFAULT_RECEIPT_MODEL =
@@ -74,8 +75,54 @@ async function parseReceipt(base64Image) {
   return JSON.parse(cleanJsonText(text));
 }
 
-async function suggestRecipes(pantryItems) {
-  const itemList = pantryItems.map((i) => i.name).join(', ');
+async function parseReceiptText(receiptText) {
+  const prompt =
+    'Extract grocery receipt data from this text. Return ONLY valid JSON with this exact structure, no markdown, no code fences: ' +
+    '{"store":"string","date":"YYYY-MM-DD","items":[{"name":"string","quantity":"string","price":number,"category":"Fruit|Vegetables|Meat|Dairy|Grains|Frozen|Snacks|Beverages|Other"}],"total":number,"tax":number}. ' +
+    "Normalize abbreviated item names and infer missing category or quantity where possible. If date is unclear use today's date.";
+
+  const result = await callGroq({
+    model: DEFAULT_RECEIPT_MODEL,
+    temperature: 0.1,
+    messages: [
+      {
+        role: 'user',
+        content: `${prompt}\n\nReceipt text:\n${receiptText}`,
+      },
+    ],
+  });
+
+  const text = result?.choices?.[0]?.message?.content;
+  if (!text || typeof text !== 'string') {
+    throw new Error('Groq returned an empty receipt text response.');
+  }
+
+  return JSON.parse(cleanJsonText(text));
+}
+
+async function parseReceiptPdf(base64Pdf) {
+  const pdfBuffer = Buffer.from(base64Pdf, 'base64');
+  const parsed = await pdfParse(pdfBuffer);
+  const extractedText = parsed?.text?.trim();
+
+  if (!extractedText) {
+    throw new Error('Could not extract text from PDF receipt.');
+  }
+
+  return parseReceiptText(extractedText);
+}
+
+async function suggestRecipes(pantryItems, preferences = {}) {
+  const itemList = pantryItems.map((i) => i.name).join(', ') || 'None';
+  const cuisineText = preferences.cuisine && preferences.cuisine !== 'Any'
+    ? preferences.cuisine
+    : 'Any';
+  const mainIngredients = Array.isArray(preferences.mainIngredients)
+    ? preferences.mainIngredients
+    : [];
+  const mainIngredientsText = mainIngredients.length > 0
+    ? mainIngredients.join(', ')
+    : 'None specified';
 
   const result = await callGroq({
     model: DEFAULT_RECIPE_MODEL,
@@ -84,8 +131,13 @@ async function suggestRecipes(pantryItems) {
       {
         role: 'user',
         content:
-          `I have these pantry items: ${itemList}. Suggest 3 recipes I can make. Return ONLY valid JSON array, no markdown, no code fences: ` +
-          '[{"id":"unique-string","name":"string","ingredients":["string"],"instructions":["string"],"nutrition":{"calories":number,"protein":number,"fat":number,"carbs":number,"fiber":number}}]',
+          `I have these pantry items: ${itemList}. ` +
+          `Preferred cuisine: ${cuisineText}. ` +
+          `Main ingredients to prioritize: ${mainIngredientsText}. ` +
+          'Suggest 3 practical recipes. Use pantry items first, and include minimal extra items if needed. ' +
+          'If a cuisine is provided, keep all recipes in that cuisine style. ' +
+          'Return ONLY valid JSON array, no markdown, no code fences, in this exact shape: ' +
+          '[{"id":"unique-string","name":"string","cuisine":"string","ingredients":["string"],"instructions":["string"],"nutrition":{"calories":number,"protein":number,"fat":number,"carbs":number,"fiber":number}}]',
       },
     ],
   });
@@ -93,6 +145,58 @@ async function suggestRecipes(pantryItems) {
   const text = result?.choices?.[0]?.message?.content;
   if (!text || typeof text !== 'string') {
     throw new Error('Groq returned an empty recipe response.');
+  }
+
+  return JSON.parse(cleanJsonText(text));
+}
+
+async function suggestRecipesFromPhoto(base64Image, pantryItems, preferences = {}) {
+  const pantryList = Array.isArray(pantryItems)
+    ? pantryItems.map((i) => i.name).join(', ') || 'None'
+    : 'None';
+  const cuisineText = preferences.cuisine && preferences.cuisine !== 'Any'
+    ? preferences.cuisine
+    : 'Any';
+  const mainIngredients = Array.isArray(preferences.mainIngredients)
+    ? preferences.mainIngredients
+    : [];
+  const mainIngredientsText = mainIngredients.length > 0
+    ? mainIngredients.join(', ')
+    : 'None specified';
+
+  const result = await callGroq({
+    model: DEFAULT_RECIPE_MODEL,
+    temperature: 0.3,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text:
+              'Analyze this food image and identify visible ingredients. ' +
+              `Also consider pantry items: ${pantryList}. ` +
+              `Preferred cuisine: ${cuisineText}. ` +
+              `Main ingredients to prioritize: ${mainIngredientsText}. ` +
+              'Suggest 3 practical recipes based on detected items + pantry context. ' +
+              'If a cuisine is provided, keep recipes in that cuisine style. ' +
+              'Return ONLY valid JSON array, no markdown, no code fences, in this exact shape: ' +
+              '[{"id":"unique-string","name":"string","cuisine":"string","ingredients":["string"],"instructions":["string"],"nutrition":{"calories":number,"protein":number,"fat":number,"carbs":number,"fiber":number}}]',
+          },
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:image/jpeg;base64,${base64Image}`,
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  const text = result?.choices?.[0]?.message?.content;
+  if (!text || typeof text !== 'string') {
+    throw new Error('Groq returned an empty recipe-from-photo response.');
   }
 
   return JSON.parse(cleanJsonText(text));
@@ -126,13 +230,40 @@ module.exports = async function handler(req, res) {
       return;
     }
 
+    if (action === 'parseReceiptPdf') {
+      if (!payload?.base64Pdf) {
+        jsonResponse(res, 400, { error: 'Missing payload.base64Pdf' });
+        return;
+      }
+
+      const data = await parseReceiptPdf(payload.base64Pdf);
+      jsonResponse(res, 200, { data });
+      return;
+    }
+
     if (action === 'suggestRecipes') {
       if (!Array.isArray(payload?.pantryItems)) {
         jsonResponse(res, 400, { error: 'Missing payload.pantryItems[]' });
         return;
       }
 
-      const data = await suggestRecipes(payload.pantryItems);
+      const data = await suggestRecipes(payload.pantryItems, payload.preferences);
+      jsonResponse(res, 200, { data });
+      return;
+    }
+
+    if (action === 'suggestRecipesFromPhoto') {
+      if (!payload?.base64Image) {
+        jsonResponse(res, 400, { error: 'Missing payload.base64Image' });
+        return;
+      }
+
+      const pantryItems = Array.isArray(payload?.pantryItems) ? payload.pantryItems : [];
+      const data = await suggestRecipesFromPhoto(
+        payload.base64Image,
+        pantryItems,
+        payload.preferences
+      );
       jsonResponse(res, 200, { data });
       return;
     }

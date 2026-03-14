@@ -31,6 +31,7 @@ export interface ReceiptItem {
 export interface Recipe {
   id: string;
   name: string;
+  cuisine?: string;
   ingredients: string[];
   instructions: string[];
   nutrition: {

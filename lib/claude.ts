@@ -49,10 +49,47 @@ export async function parseReceiptImage(
   return data.data as ParsedReceipt;
 }
 
+export async function parseReceiptPdf(
+  base64Pdf: string
+): Promise<ParsedReceipt> {
+  if (!API_URL) {
+    throw new Error(
+      'API base URL not configured. Set EXPO_PUBLIC_API_BASE_URL in your .env file.'
+    );
+  }
+
+  const response = await fetch(API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'parseReceiptPdf',
+      payload: {
+        base64Pdf,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Backend API error ${response.status}: ${err}`);
+  }
+
+  const data = await response.json();
+  return data.data as ParsedReceipt;
+}
+
 // ── Recipe suggestions ────────────────────────────────────────────────────────
 
+export interface RecipePreferences {
+  cuisine?: string;
+  mainIngredients?: string[];
+}
+
 export async function suggestRecipes(
-  pantryItems: PantryItem[]
+  pantryItems: PantryItem[],
+  preferences?: RecipePreferences
 ): Promise<Recipe[]> {
   if (!API_URL) {
     throw new Error(
@@ -69,6 +106,42 @@ export async function suggestRecipes(
       action: 'suggestRecipes',
       payload: {
         pantryItems,
+        preferences,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Backend API error ${response.status}: ${err}`);
+  }
+
+  const data = await response.json();
+  return data.data as Recipe[];
+}
+
+export async function suggestRecipesFromPhoto(
+  base64Image: string,
+  pantryItems: PantryItem[],
+  preferences?: RecipePreferences
+): Promise<Recipe[]> {
+  if (!API_URL) {
+    throw new Error(
+      'API base URL not configured. Set EXPO_PUBLIC_API_BASE_URL in your .env file.'
+    );
+  }
+
+  const response = await fetch(API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'suggestRecipesFromPhoto',
+      payload: {
+        base64Image,
+        pantryItems,
+        preferences,
       },
     }),
   });

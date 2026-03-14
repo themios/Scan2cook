@@ -39,7 +39,12 @@ export default function RecipeCard({ recipe }: Props) {
         accessibilityRole="button"
         accessibilityLabel={`${recipe.name}, ${expanded ? 'collapse' : 'expand'} recipe`}
       >
-        <Text style={styles.title}>{recipe.name}</Text>
+        <View style={styles.titleWrap}>
+          <Text style={styles.title}>{recipe.name}</Text>
+          {recipe.cuisine ? (
+            <Text style={styles.cuisineTag}>{recipe.cuisine}</Text>
+          ) : null}
+        </View>
         <Text style={styles.chevron}>{expanded ? '▲' : '▼'}</Text>
       </TouchableOpacity>
 
@@ -116,12 +121,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 14,
   },
+  titleWrap: {
+    flex: 1,
+    marginRight: 8,
+  },
   title: {
     fontSize: 17,
     fontWeight: '700',
     color: '#212121',
-    flex: 1,
-    marginRight: 8,
+  },
+  cuisineTag: {
+    marginTop: 4,
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#2E7D32',
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
   },
   chevron: {
     fontSize: 12,

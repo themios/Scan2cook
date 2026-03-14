@@ -9,17 +9,35 @@ import {
   SafeAreaView,
   StatusBar,
   Alert,
+  TextInput,
 } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { getPantry } from '../lib/storage';
-import { suggestRecipes } from '../lib/claude';
+import * as ImagePicker from 'expo-image-picker';
+import { suggestRecipes, suggestRecipesFromPhoto } from '../lib/claude';
 import { PantryItem, Recipe } from '../lib/types';
 import { DEMO_RECIPES } from '../lib/demo';
 import RecipeCard from '../components/RecipeCard';
 
+const CUISINE_OPTIONS = [
+  'Any',
+  'Greek',
+  'Italian',
+  'American',
+  'Indian',
+  'Thai',
+  'Chinese',
+  'Mexican',
+  'Japanese',
+  'Mediterranean',
+] as const;
+
 export default function RecipesScreen() {
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [pantryItems, setPantryItems] = useState<PantryItem[]>([]);
+  const [selectedCuisine, setSelectedCuisine] =
+    useState<(typeof CUISINE_OPTIONS)[number]>('Any');
+  const [mainIngredientsInput, setMainIngredientsInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,10 +57,12 @@ export default function RecipesScreen() {
   }
 
   async function handleSuggest() {
-    if (pantryItems.length === 0) {
+    const mainIngredients = getMainIngredients();
+
+    if (pantryItems.length === 0 && mainIngredients.length === 0) {
       Alert.alert(
-        'Empty Pantry',
-        'Add items to your pantry first by scanning a receipt or adding manually.'
+        'Need Ingredients',
+        'Add pantry items or type main ingredients to get recipe suggestions.'
       );
       return;
     }
@@ -51,7 +71,10 @@ export default function RecipesScreen() {
     setError(null);
 
     try {
-      const result = await suggestRecipes(pantryItems);
+      const result = await suggestRecipes(pantryItems, {
+        cuisine: selectedCuisine,
+        mainIngredients,
+      });
       setRecipes(result);
       setHasLoaded(true);
     } catch (err: any) {
@@ -66,6 +89,87 @@ export default function RecipesScreen() {
     }
   }
 
+  function getMainIngredients() {
+    return mainIngredientsInput
+      .split(',')
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+
+  async function handleSuggestFromPhoto(base64Image: string) {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await suggestRecipesFromPhoto(base64Image, pantryItems, {
+        cuisine: selectedCuisine,
+        mainIngredients: getMainIngredients(),
+      });
+      setRecipes(result);
+      setHasLoaded(true);
+    } catch (err: any) {
+      setError(
+        err.message?.includes('API base URL')
+          ? err.message
+          : 'Could not get recipe suggestions from photo. Check your API setup and try again.'
+      );
+      setHasLoaded(false);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleTakePhoto() {
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert(
+          'Camera Permission Needed',
+          'Allow camera access to take a photo of your ingredients.'
+        );
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.7,
+        base64: true,
+      });
+
+      if (result.canceled || !result.assets?.length) return;
+
+      const base64 = result.assets[0].base64;
+      if (!base64) {
+        Alert.alert('Photo Error', 'Could not read image data from camera.');
+        return;
+      }
+
+      await handleSuggestFromPhoto(base64);
+    } catch {
+      Alert.alert(
+        'Camera Not Available',
+        'Use "Choose Food Photo" to upload an image from your device.'
+      );
+    }
+  }
+
+  async function handlePickPhoto() {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.7,
+      base64: true,
+    });
+
+    if (result.canceled || !result.assets?.length) return;
+
+    const base64 = result.assets[0].base64;
+    if (!base64) {
+      Alert.alert('Image Error', 'Could not read image data from selected file.');
+      return;
+    }
+
+    await handleSuggestFromPhoto(base64);
+  }
+
   function handleShowDemo() {
     setRecipes(DEMO_RECIPES);
     setHasLoaded(true);
@@ -77,6 +181,7 @@ export default function RecipesScreen() {
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
       <View style={styles.header}>
         <Text style={styles.title}>Recipes</Text>
+        <Text style={styles.systemTag}>Food intelligence from receipts + photos</Text>
         {pantryItems.length > 0 && (
           <Text style={styles.subtitle}>
             Based on {pantryItems.length} pantry items
@@ -97,6 +202,54 @@ export default function RecipesScreen() {
           />
         ) : (
           <>
+            <View style={styles.prefCard}>
+              <Text style={styles.prefLabel}>Cuisine</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.cuisineRow}
+              >
+                {CUISINE_OPTIONS.map((cuisine) => {
+                  const selected = selectedCuisine === cuisine;
+                  return (
+                    <TouchableOpacity
+                      key={cuisine}
+                      style={[
+                        styles.cuisineChip,
+                        selected && styles.cuisineChipSelected,
+                      ]}
+                      onPress={() => setSelectedCuisine(cuisine)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Cuisine ${cuisine}`}
+                    >
+                      <Text
+                        style={[
+                          styles.cuisineChipText,
+                          selected && styles.cuisineChipTextSelected,
+                        ]}
+                      >
+                        {cuisine}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              <Text style={styles.prefLabel}>Main Ingredients (Optional)</Text>
+              <TextInput
+                style={styles.ingredientsInput}
+                value={mainIngredientsInput}
+                onChangeText={setMainIngredientsInput}
+                placeholder="e.g. chicken, rice, tomato"
+                placeholderTextColor="#9E9E9E"
+                autoCapitalize="none"
+                accessibilityLabel="Main ingredients input"
+              />
+              <Text style={styles.prefHint}>
+                Separate ingredients with commas.
+              </Text>
+            </View>
+
             {/* Suggest button */}
             <TouchableOpacity
               style={[
@@ -119,6 +272,27 @@ export default function RecipesScreen() {
                 </>
               )}
             </TouchableOpacity>
+
+            <View style={styles.photoActionsRow}>
+              <TouchableOpacity
+                style={styles.photoActionBtn}
+                onPress={handleTakePhoto}
+                disabled={loading}
+                accessibilityRole="button"
+                accessibilityLabel="Take photo of ingredients"
+              >
+                <Text style={styles.photoActionText}>Take Item Photo</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.photoActionBtn}
+                onPress={handlePickPhoto}
+                disabled={loading}
+                accessibilityRole="button"
+                accessibilityLabel="Choose ingredients photo"
+              >
+                <Text style={styles.photoActionText}>Choose Food Photo</Text>
+              </TouchableOpacity>
+            </View>
 
             {loading && (
               <View style={styles.loadingCard}>
@@ -170,7 +344,7 @@ export default function RecipesScreen() {
             )}
 
             {/* Pantry empty state */}
-            {pantryItems.length === 0 && (
+            {pantryItems.length === 0 && mainIngredientsInput.trim().length === 0 && (
               <View style={styles.emptyState}>
                 <Text style={styles.emptyIcon}>🛒</Text>
                 <Text style={styles.emptyTitle}>Pantry is empty</Text>
@@ -209,11 +383,71 @@ const styles = StyleSheet.create({
     color: '#9E9E9E',
     marginTop: 2,
   },
+  systemTag: {
+    fontSize: 12,
+    color: '#2E7D32',
+    marginTop: 4,
+    fontWeight: '600',
+  },
   scroll: {
     flex: 1,
   },
   scrollContent: {
     paddingHorizontal: 16,
+  },
+  prefCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#EEEEEE',
+  },
+  prefLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#424242',
+    marginBottom: 8,
+  },
+  cuisineRow: {
+    paddingBottom: 10,
+    gap: 8,
+  },
+  cuisineChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: '#F5F5F5',
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+  },
+  cuisineChipSelected: {
+    backgroundColor: '#2E7D32',
+    borderColor: '#2E7D32',
+  },
+  cuisineChipText: {
+    fontSize: 12,
+    color: '#616161',
+    fontWeight: '600',
+  },
+  cuisineChipTextSelected: {
+    color: '#FFFFFF',
+  },
+  ingredientsInput: {
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+    borderRadius: 10,
+    backgroundColor: '#FAFAFA',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: '#212121',
+    minHeight: 44,
+  },
+  prefHint: {
+    fontSize: 12,
+    color: '#9E9E9E',
+    marginTop: 6,
   },
   suggestBtn: {
     backgroundColor: '#2E7D32',
@@ -241,6 +475,30 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
+  },
+  photoActionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: -4,
+    marginBottom: 16,
+  },
+  photoActionBtn: {
+    flex: 1,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 10,
+    backgroundColor: '#E8F5E9',
+    borderWidth: 1,
+    borderColor: '#A5D6A7',
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  photoActionText: {
+    fontSize: 13,
+    color: '#2E7D32',
+    fontWeight: '700',
+    textAlign: 'center',
   },
   loadingCard: {
     backgroundColor: '#E8F5E9',

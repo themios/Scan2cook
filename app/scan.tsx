@@ -14,8 +14,9 @@ import {
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system';
+import * as DocumentPicker from 'expo-document-picker';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { parseReceiptImage } from '../lib/claude';
+import { parseReceiptImage, parseReceiptPdf, ParsedReceipt } from '../lib/claude';
 import { addPantryItems, saveReceipt } from '../lib/storage';
 import { PantryItem, ReceiptItem } from '../lib/types';
 import ReceiptReview from '../components/ReceiptReview';
@@ -98,24 +99,7 @@ export default function ScanScreen() {
       }
 
       const result = await parseReceiptImage(manipulated.base64);
-
-      const receiptItems: ReceiptItem[] = result.items.map((item) => ({
-        id: generateId(),
-        name: item.name,
-        rawName: item.name,
-        quantity: item.quantity || '1',
-        price: item.price,
-        category: item.category,
-      }));
-
-      setParsedData({
-        store: result.store || 'Unknown Store',
-        date: result.date || new Date().toISOString().split('T')[0],
-        items: receiptItems,
-        total: result.total,
-        tax: result.tax,
-      });
-
+      setParsedFromResult(result);
       setScreenState('review');
     } catch (err: any) {
       setScreenState('camera');
@@ -125,6 +109,66 @@ export default function ScanScreen() {
           ? err.message
           : 'Could not parse the receipt. Make sure EXPO_PUBLIC_API_BASE_URL is set and try again with better lighting.',
         [{ text: 'OK' }]
+      );
+    }
+  }
+
+  function setParsedFromResult(result: ParsedReceipt) {
+    const receiptItems: ReceiptItem[] = result.items.map((item) => ({
+      id: generateId(),
+      name: item.name,
+      rawName: item.name,
+      quantity: item.quantity || '1',
+      price: item.price,
+      category: item.category,
+    }));
+
+    setParsedData({
+      store: result.store || 'Unknown Store',
+      date: result.date || new Date().toISOString().split('T')[0],
+      items: receiptItems,
+      total: result.total,
+      tax: result.tax,
+    });
+  }
+
+  async function handleUpload() {
+    try {
+      const picked = await DocumentPicker.getDocumentAsync({
+        type: ['image/*', 'application/pdf'],
+        copyToCacheDirectory: true,
+        multiple: false,
+        base64: true,
+      });
+
+      if (picked.canceled || !picked.assets?.length) return;
+
+      const file = picked.assets[0];
+      const mimeType = file.mimeType || '';
+      let base64 = file.base64;
+
+      if (!base64 && file.uri) {
+        base64 = await FileSystem.readAsStringAsync(file.uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      }
+
+      if (!base64) {
+        throw new Error('Could not read uploaded file.');
+      }
+
+      setScreenState('parsing');
+      const result = mimeType === 'application/pdf'
+        ? await parseReceiptPdf(base64)
+        : await parseReceiptImage(base64);
+
+      setParsedFromResult(result);
+      setScreenState('review');
+    } catch (err: any) {
+      setScreenState('camera');
+      Alert.alert(
+        'Upload Failed',
+        err.message || 'Could not parse uploaded file.'
       );
     }
   }
@@ -205,6 +249,14 @@ export default function ScanScreen() {
           accessibilityLabel="Grant camera permission"
         >
           <Text style={styles.permissionBtnText}>Allow Camera Access</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.uploadBtn}
+          onPress={handleUpload}
+          accessibilityRole="button"
+          accessibilityLabel="Upload receipt image or PDF"
+        >
+          <Text style={styles.uploadBtnText}>Upload Image or PDF Instead</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.skipBtn}
@@ -334,6 +386,14 @@ export default function ScanScreen() {
               Make sure the receipt is well-lit and flat
             </Text>
             <TouchableOpacity
+              style={styles.uploadBtnDark}
+              onPress={handleUpload}
+              accessibilityRole="button"
+              accessibilityLabel="Upload receipt image or PDF"
+            >
+              <Text style={styles.uploadBtnDarkText}>Upload Image/PDF</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
               style={[styles.captureBtn, !cameraReady && styles.captureBtnDisabled]}
               onPress={handleCapture}
               disabled={!cameraReady}
@@ -407,6 +467,23 @@ const styles = StyleSheet.create({
   permissionBtnText: {
     color: '#FFFFFF',
     fontSize: 16,
+    fontWeight: '700',
+  },
+  uploadBtn: {
+    borderRadius: 12,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    minHeight: 48,
+    justifyContent: 'center',
+    marginBottom: 12,
+    width: '100%',
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: '#2E7D32',
+  },
+  uploadBtnText: {
+    color: '#2E7D32',
+    fontSize: 15,
     fontWeight: '700',
   },
   skipBtn: {
@@ -513,6 +590,21 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginBottom: 20,
     textAlign: 'center',
+  },
+  uploadBtnDark: {
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.7)',
+    marginBottom: 14,
+    minHeight: 40,
+    justifyContent: 'center',
+  },
+  uploadBtnDarkText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
   },
   captureBtn: {
     width: 72,
